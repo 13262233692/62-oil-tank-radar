@@ -23,46 +23,57 @@ Close() error
 }
 
 type Processor struct {
-cfg       config.FFTConfig
-framerCfg config.FramerConfig
-pool      *pool.BufferPool
-logger    *zap.Logger
-inCh      <-chan *model.FMCWRawFrame
-outCh     chan<- *model.FFTResult
-fft       FFTOperator
-wg        sync.WaitGroup
-ctx       context.Context
-cancel    context.CancelFunc
-stats     ProcessorStats
-mu        sync.Mutex
-peakBuf   []model.PeakInfo
+	cfg              config.FFTConfig
+	framerCfg        config.FramerConfig
+	pool             *pool.BufferPool
+	logger           *zap.Logger
+	inCh             <-chan *model.FMCWRawFrame
+	outCh            chan<- *model.FFTResult
+	fft              FFTOperator
+	wg               sync.WaitGroup
+	ctx              context.Context
+	cancel           context.CancelFunc
+	stats            ProcessorStats
+	mu               sync.Mutex
+	peakBuf          []model.PeakInfo
+	coherenceMask    *CoherenceMask
+	dlsSolver        *DLSSubPixelSolver
+	multipathSuppr   *MultipathSuppressor
 }
 
 type ProcessorStats struct {
-FramesProcessed uint64
-FFTTimeNs       uint64
-Errors          uint64
-DroppedFrames   uint64
+	FramesProcessed   uint64
+	FFTTimeNs         uint64
+	Errors            uint64
+	DroppedFrames     uint64
+	MaskedGridPoints  uint64
+	AvgCoherence      float64
+	DLSConverged      uint64
+	DLSFallback       uint64
+	MultipathRejected uint64
 }
 
 func NewProcessor(
-cfg config.FFTConfig,
-framerCfg config.FramerConfig,
-bufferPool *pool.BufferPool,
-logger *zap.Logger,
+	cfg config.FFTConfig,
+	framerCfg config.FramerConfig,
+	bufferPool *pool.BufferPool,
+	logger *zap.Logger,
 ) *Processor {
-ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
-return &Processor{
-cfg:       cfg,
-framerCfg: framerCfg,
-pool:      bufferPool,
-logger:    logger,
-ctx:       ctx,
-cancel:    cancel,
-fft:       NewCGOFFT(cfg),
-peakBuf:   make([]model.PeakInfo, 0, 100),
-}
+	return &Processor{
+		cfg:            cfg,
+		framerCfg:      framerCfg,
+		pool:           bufferPool,
+		logger:         logger,
+		ctx:            ctx,
+		cancel:         cancel,
+		fft:            NewCGOFFT(cfg),
+		peakBuf:        make([]model.PeakInfo, 0, 100),
+		coherenceMask:  NewCoherenceMask(cfg),
+		dlsSolver:      NewDLSSubPixelSolver(cfg),
+		multipathSuppr: NewMultipathSuppressor(cfg),
+	}
 }
 
 func (p *Processor) Start(inCh <-chan *model.FMCWRawFrame, outCh chan<- *model.FFTResult) error {
@@ -256,33 +267,144 @@ return fftResult, nil
 }
 
 func (p *Processor) DetectPeaks(fftResult *model.FFTResult) ([]model.PeakInfo, error) {
-rangeBins := fftResult.RangeBins
-dopplerBins := fftResult.DopplerBins
+	rangeBins := fftResult.RangeBins
+	dopplerBins := fftResult.DopplerBins
 
-peaks := p.fft.CFARDetect(
-fftResult.RDMatrix,
-dopplerBins, rangeBins,
-p.cfg.CFARGuardCells,
-p.cfg.CFARTrainCells,
-p.cfg.CFARThreshold,
-p.peakBuf,
-)
+	rdMatrix := make([]float64, len(fftResult.RDMatrix))
+	copy(rdMatrix, fftResult.RDMatrix)
 
-for i := range peaks {
-peak := &peaks[i]
-peak.DistanceM = rangeBinToDistance(peak.RangeBin, rangeBins,
-p.framerCfg.SamplesPerChirp,
-p.framerCfg.ChirpsPerFrame,
-p.cfg.RangeFFTSize,
-24.0, 250.0, 12.5)
-peak.VelocityMPS = dopplerBinToVelocity(peak.DopplerBin, dopplerBins,
-24.0, 12.5e6, 256)
-if peak.Amplitude == 0 {
-peak.Amplitude = peak.Magnitude
+	for i, v := range rdMatrix {
+		if !isFinite(v) || v < 0 {
+			rdMatrix[i] = 0.0
+		}
+	}
+
+	maskedCount, avgCoherence := p.coherenceMask.Apply(
+		rdMatrix, fftResult.RangeDoppler, dopplerBins, rangeBins,
+	)
+
+	p.mu.Lock()
+	p.stats.MaskedGridPoints += uint64(maskedCount)
+	if p.stats.FramesProcessed > 0 {
+		p.stats.AvgCoherence = (p.stats.AvgCoherence*float64(p.stats.FramesProcessed) + avgCoherence) /
+			float64(p.stats.FramesProcessed+1)
+	} else {
+		p.stats.AvgCoherence = avgCoherence
+	}
+	p.mu.Unlock()
+
+	rawPeaks := p.fft.CFARDetect(
+		rdMatrix,
+		dopplerBins, rangeBins,
+		p.cfg.CFARGuardCells,
+		p.cfg.CFARTrainCells,
+		p.cfg.CFARThreshold,
+		p.peakBuf,
+	)
+
+	beforeCount := len(rawPeaks)
+	rawPeaks = p.multipathSuppr.Apply(rawPeaks, rdMatrix, rangeBins, dopplerBins)
+	multipathRejected := beforeCount - len(rawPeaks)
+	if multipathRejected > 0 {
+		p.mu.Lock()
+		p.stats.MultipathRejected += uint64(multipathRejected)
+		p.mu.Unlock()
+	}
+
+	for i := range rawPeaks {
+		peak := &rawPeaks[i]
+
+		peak.CoherenceScore = avgCoherence
+
+		subResult := p.dlsSolver.Solve(
+			rdMatrix, peak.RangeBin, peak.DopplerBin, rangeBins, dopplerBins,
+		)
+
+		p.mu.Lock()
+		if subResult.Converged && (subResult.MethodUsed == "dls_gauss_newton" ||
+			subResult.MethodUsed == "gaussian_log") {
+			p.stats.DLSConverged++
+		} else {
+			p.stats.DLSFallback++
+		}
+		p.mu.Unlock()
+
+		peak.RangeSubPixel = subResult.RangeExact
+		peak.DopplerSubPixel = subResult.DopplerExact
+		peak.SubPixelValid = subResult.Converged
+		peak.SubPixelMethod = subResult.MethodUsed
+		peak.ConditionNumber = subResult.ConditionNum
+
+		rangeForCalc := float64(peak.RangeBin)
+		if peak.SubPixelValid && isFinite(peak.RangeSubPixel) {
+			rangeForCalc = peak.RangeSubPixel
+		}
+		dopplerForCalc := float64(peak.DopplerBin)
+		if peak.SubPixelValid && isFinite(peak.DopplerSubPixel) {
+			dopplerForCalc = peak.DopplerSubPixel
+		}
+
+		peak.DistanceM = rangeBinToDistanceInterpolated(
+			rangeForCalc, rangeBins,
+			p.framerCfg.SamplesPerChirp,
+			p.framerCfg.ChirpsPerFrame,
+			p.cfg.RangeFFTSize,
+			24.0, 250.0, 12.5,
+		)
+
+		sampleRateHz := 12.5e6
+		peak.VelocityMPS = dopplerBinToVelocityInterpolated(
+			dopplerForCalc, dopplerBins,
+			24.0, sampleRateHz,
+			p.framerCfg.SamplesPerChirp,
+		)
+
+		if peak.Amplitude == 0 {
+			peak.Amplitude = peak.Magnitude
+		}
+
+		SanitizePeak(peak)
+	}
+
+	if len(rawPeaks) > 0 {
+		bestPeak := &rawPeaks[0]
+		if bestPeak.SubPixelValid {
+			fftResult.PeakRangeIdx = int(math.Round(bestPeak.RangeSubPixel))
+			fftResult.PeakDopplerIdx = int(math.Round(bestPeak.DopplerSubPixel))
+		}
+	}
+
+	return rawPeaks, nil
 }
+
+func rangeBinToDistanceInterpolated(
+	rangeBinExact float64, rangeBins, samplesPerChirp, chirpsPerFrame, fftSize int,
+	startFreqGHz, bandwidthGHz, sampleRateMHz float64,
+) float64 {
+	if !isFinite(rangeBinExact) {
+		return 0
+	}
+	c := 299792458.0
+	bandwidthHz := bandwidthGHz * 1e9
+	binResolution := c / (2 * bandwidthHz)
+	nyquistRange := binResolution * float64(fftSize) / 2
+	return rangeBinExact * nyquistRange / float64(fftSize/2)
 }
 
-return peaks, nil
+func dopplerBinToVelocityInterpolated(
+	dopplerBinExact float64, dopplerBins int,
+	startFreqGHz, sampleRateHz float64, samplesPerChirp int,
+) float64 {
+	if !isFinite(dopplerBinExact) {
+		return 0
+	}
+	c := 299792458.0
+	startFreqHz := startFreqGHz * 1e9
+	wavelength := c / startFreqHz
+	prf := sampleRateHz / float64(samplesPerChirp)
+	velocityResolution := wavelength * prf / (2 * float64(dopplerBins))
+	nyquistVelocity := velocityResolution * float64(dopplerBins) / 2
+	return (dopplerBinExact - float64(dopplerBins)/2) * nyquistVelocity / float64(dopplerBins/2)
 }
 
 func (p *Processor) GetStats() ProcessorStats {

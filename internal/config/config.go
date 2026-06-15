@@ -37,16 +37,28 @@ MaxFrameSize     int           `yaml:"max_frame_size"`
 }
 
 type FFTConfig struct {
-RangeFFTSize   int     `yaml:"range_fft_size"`
-DopplerFFTSize int     `yaml:"doppler_fft_size"`
-WindowType     string  `yaml:"window_type"`
-WindowAlpha    float64 `yaml:"window_alpha"`
-CFARGuardCells int     `yaml:"cfar_guard_cells"`
-CFARTrainCells int     `yaml:"cfar_train_cells"`
-CFARThreshold  float64 `yaml:"cfar_threshold"`
-Workers        int     `yaml:"workers"`
-MaxQueueDepth  int     `yaml:"max_queue_depth"`
-EnableFFTShift bool    `yaml:"enable_fft_shift"`
+	RangeFFTSize   int     `yaml:"range_fft_size"`
+	DopplerFFTSize int     `yaml:"doppler_fft_size"`
+	WindowType     string  `yaml:"window_type"`
+	WindowAlpha    float64 `yaml:"window_alpha"`
+	CFARGuardCells int     `yaml:"cfar_guard_cells"`
+	CFARTrainCells int     `yaml:"cfar_train_cells"`
+	CFARThreshold  float64 `yaml:"cfar_threshold"`
+	Workers        int     `yaml:"workers"`
+	MaxQueueDepth  int     `yaml:"max_queue_depth"`
+	EnableFFTShift bool    `yaml:"enable_fft_shift"`
+	EnableCoherenceMask bool    `yaml:"enable_coherence_mask"`
+	CoherenceMaskThreshold  float64 `yaml:"coherence_mask_threshold"`
+	PhaseCoherenceWeight    float64 `yaml:"phase_coherence_weight"`
+	AmplitudeStabilityWeight float64 `yaml:"amplitude_stability_weight"`
+	EnableSubPixelInterp    bool    `yaml:"enable_subpixel_interp"`
+	SubPixelMethod          string  `yaml:"subpixel_method"`
+	DLSDampingFactor        float64 `yaml:"dls_damping_factor"`
+	DLSConditionNumLimit    float64 `yaml:"dls_condition_num_limit"`
+	DLSMaxIterations        int     `yaml:"dls_max_iterations"`
+	EnableMultipathSuppression bool   `yaml:"enable_multipath_suppression"`
+	MultipathNullDepth      float64 `yaml:"multipath_null_depth"`
+	MultipathHarmonicOrder  int     `yaml:"multipath_harmonic_order"`
 }
 
 type RangingConfig struct {

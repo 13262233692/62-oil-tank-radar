@@ -55,68 +55,101 @@ lastTemp:  20.0,
 }
 
 func (c *Calculator) Calculate(
-fftResult *model.FFTResult,
-peaks []model.PeakInfo,
+	fftResult *model.FFTResult,
+	peaks []model.PeakInfo,
 ) *model.LevelMeasurement {
-c.mu.Lock()
-c.stats.Measurements++
-c.mu.Unlock()
+	c.mu.Lock()
+	c.stats.Measurements++
+	c.mu.Unlock()
 
-measurement := &model.LevelMeasurement{
-Timestamp:   fftResult.Timestamp,
-FrameNumber: fftResult.FrameNumber,
-Valid:       false,
-Status:      "processing",
-}
+	measurement := &model.LevelMeasurement{
+		Timestamp:   fftResult.Timestamp,
+		FrameNumber: fftResult.FrameNumber,
+		Valid:       false,
+		Status:      "processing",
+	}
+	measurement.Ref()
 
-if len(peaks) == 0 {
-c.mu.Lock()
-c.stats.Errors++
-c.mu.Unlock()
-measurement.Status = "no_peaks"
-return measurement
-}
+	if len(peaks) == 0 {
+		c.mu.Lock()
+		c.stats.Errors++
+		c.mu.Unlock()
+		measurement.Status = "no_peaks"
+		return measurement
+	}
 
-validPeak := c.selectValidPeak(peaks)
-if validPeak == nil {
-c.mu.Lock()
-c.stats.Errors++
-c.mu.Unlock()
-measurement.Status = "no_valid_peaks"
-return measurement
-}
+	validPeak := c.selectValidPeak(peaks)
+	if validPeak == nil {
+		c.mu.Lock()
+		c.stats.Errors++
+		c.mu.Unlock()
+		measurement.Status = "no_valid_peaks"
+		return measurement
+	}
 
-distance := c.calculateDistance(validPeak.RangeBin)
-distance = c.applyTemperatureCompensation(distance)
+	distance := c.calculateDistanceFromPeak(validPeak)
+	if !isFinite64(distance) {
+		distance = c.calculateDistance(validPeak.RangeBin)
+	}
+	distance = c.applyTemperatureCompensation(distance)
+	if !isFinite64(distance) {
+		measurement.Status = "nan_distance"
+		return measurement
+	}
 
-snr := validPeak.SNR
-confidence := c.calculateConfidence(snr, distance)
+	snr := validPeak.SNR
+	if !isFinite64(snr) {
+		snr = 0
+	}
+	confidence := c.calculateConfidence(snr, distance)
+	if !isFinite64(confidence) {
+		confidence = 0
+	}
 
-if snr < c.cfg.SNRThreshold {
-measurement.Status = "low_snr"
-return measurement
-}
+	if validPeak.ConditionNumber > 1e6 && validPeak.ConditionNumber < 1e100 {
+		confidence *= math.Sqrt(1e6 / validPeak.ConditionNumber)
+		confidence = math.Max(confidence, 0.01)
+	}
 
-if distance < c.cfg.MinDistanceM || distance > c.cfg.MaxDistanceM {
-measurement.Status = "out_of_range"
-return measurement
-}
+	if snr < c.cfg.SNRThreshold {
+		measurement.Status = "low_snr"
+		return measurement
+	}
 
-level := c.cfg.TankHeightM - distance
-volume := c.calculateVolume(level)
-waveHeight := c.calculateWaveHeight(distance)
+	if distance < c.cfg.MinDistanceM || distance > c.cfg.MaxDistanceM {
+		measurement.Status = "out_of_range"
+		return measurement
+	}
 
-measurement.DistanceM = distance
-measurement.LevelM = level
-measurement.VolumeM3 = volume
-measurement.TemperatureC = c.lastTemp
-measurement.SNR = snr
-measurement.Confidence = confidence
-measurement.WaveHeightM = waveHeight
-measurement.PeakInfo = *validPeak
-measurement.PeakInfo.DistanceM = distance
-measurement.Valid = true
-measurement.Status = "valid"
+	level := c.cfg.TankHeightM - distance
+	if !isFinite64(level) {
+		level = 0
+	}
+	volume := c.calculateVolume(level)
+	if !isFinite64(volume) {
+		volume = 0
+	}
+	waveHeight := c.calculateWaveHeight(distance)
+	if !isFinite64(waveHeight) {
+		waveHeight = 0
+	}
+	velocity := validPeak.VelocityMPS
+	if !isFinite64(velocity) {
+		velocity = 0
+	}
+
+	measurement.DistanceM = distance
+	measurement.LevelM = level
+	measurement.VolumeM3 = volume
+	measurement.TemperatureC = c.lastTemp
+	measurement.SNR = snr
+	measurement.VelocityMPS = velocity
+	measurement.Confidence = confidence
+	measurement.WaveHeightM = waveHeight
+	measurement.PeakInfo = *validPeak
+	measurement.PeakInfo.DistanceM = distance
+	measurement.Valid = true
+	measurement.Status = "valid"
 
 c.mu.Lock()
 c.stats.ValidMeasurements++
@@ -135,35 +168,83 @@ return measurement
 }
 
 func (c *Calculator) selectValidPeak(peaks []model.PeakInfo) *model.PeakInfo {
-if len(peaks) == 0 {
-return nil
+	if len(peaks) == 0 {
+		return nil
+	}
+
+	var bestPeak *model.PeakInfo
+	bestScore := -1.0
+
+	for i := range peaks {
+		peak := &peaks[i]
+		if !isFinite64(peak.SNR) || !isFinite64(peak.Magnitude) {
+			continue
+		}
+
+		distance := c.calculateDistanceFromPeak(peak)
+		if !isFinite64(distance) {
+			continue
+		}
+
+		if distance < c.cfg.MinDistanceM || distance > c.cfg.MaxDistanceM {
+			continue
+		}
+
+		snr := peak.SNR
+		rangeBins := c.fftCfg.RangeFFTSize
+		centerBin := rangeBins / 4
+
+		exactBin := float64(peak.RangeBin)
+		if peak.SubPixelValid && isFinite64(peak.RangeSubPixel) {
+			exactBin = peak.RangeSubPixel
+		}
+		rangeWeight := 1.0 - math.Abs(exactBin-float64(centerBin))/float64(rangeBins/2)
+		rangeWeight = math.Max(rangeWeight, 0.1)
+
+		coherenceBonus := 1.0
+		if isFinite64(peak.CoherenceScore) && peak.CoherenceScore > 0 {
+			coherenceBonus = 0.5 + 0.5*peak.CoherenceScore
+		}
+
+		condPenalty := 1.0
+		if isFinite64(peak.ConditionNumber) && peak.ConditionNumber > c.fftCfg.DLSConditionNumLimit*0.1 {
+			condPenalty = c.fftCfg.DLSConditionNumLimit * 0.1 / (peak.ConditionNumber + 1e-10)
+			condPenalty = math.Max(condPenalty, 0.01)
+		}
+
+		score := snr * rangeWeight * coherenceBonus * condPenalty
+
+		if score > bestScore {
+			bestScore = score
+			bestPeak = peak
+		}
+	}
+
+	return bestPeak
 }
 
-var bestPeak *model.PeakInfo
-bestScore := -1.0
-
-for i := range peaks {
-distance := c.calculateDistance(peaks[i].RangeBin)
-
-if distance < c.cfg.MinDistanceM || distance > c.cfg.MaxDistanceM {
-continue
+func (c *Calculator) calculateDistanceFromPeak(peak *model.PeakInfo) float64 {
+	rangeForCalc := float64(peak.RangeBin)
+	if peak.SubPixelValid && isFinite64(peak.RangeSubPixel) {
+		rangeForCalc = peak.RangeSubPixel
+	}
+	return fft.RangeBinToDistance(
+		int(math.Round(rangeForCalc)),
+		c.fftCfg.RangeFFTSize,
+		c.framerCfg.SamplesPerChirp,
+		c.framerCfg.ChirpsPerFrame,
+		c.fftCfg.RangeFFTSize,
+		c.cfg.StartFreqGHz,
+		c.cfg.BandwidthGHz,
+		c.cfg.SampleRateMHz,
+	)
 }
 
-snr := peaks[i].SNR
-rangeBins := c.fftCfg.RangeFFTSize
-centerBin := rangeBins / 4
-rangeWeight := 1.0 - math.Abs(float64(peaks[i].RangeBin)-float64(centerBin)) / float64(rangeBins/2)
-rangeWeight = math.Max(rangeWeight, 0.1)
-
-score := snr * rangeWeight
-
-if score > bestScore {
-bestScore = score
-bestPeak = &peaks[i]
-}
-}
-
-return bestPeak
+func isFinite64(v float64) bool {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
+	return math.Abs(v) < 1e100
 }
 
 func (c *Calculator) calculateDistance(rangeBin int) float64 {

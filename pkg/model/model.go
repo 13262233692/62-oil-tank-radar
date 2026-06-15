@@ -72,14 +72,16 @@ m.Data[row*m.Cols+col] = val
 }
 
 type FFTResult struct {
-RangeDoppler [][]complex128
-RangeProfile []float64
-RDMatrix     []float64
-RangeBins    int
-DopplerBins  int
-Timestamp    time.Time
-FrameNumber  uint64
-refCount     int32
+	RangeDoppler   [][]complex128
+	RangeProfile   []float64
+	RDMatrix       []float64
+	RangeBins      int
+	DopplerBins    int
+	Timestamp      time.Time
+	FrameNumber    uint64
+	PeakRangeIdx   int
+	PeakDopplerIdx int
+	refCount       int32
 }
 
 func (r *FFTResult) Ref() {
@@ -102,15 +104,21 @@ return cmplx.Abs(r.RangeDoppler[dopplerBin][rangeBin])
 }
 
 type PeakInfo struct {
-RangeBin    int
-DopplerBin  int
-Magnitude   float64
-Amplitude   float64
-Phase       float64
-SNR         float64
-DistanceM   float64
-VelocityMPS float64
-Confidence  float64
+	RangeBin         int
+	DopplerBin       int
+	RangeSubPixel    float64
+	DopplerSubPixel  float64
+	SubPixelValid    bool
+	SubPixelMethod   string
+	ConditionNumber  float64
+	Magnitude        float64
+	Amplitude        float64
+	Phase            float64
+	SNR              float64
+	DistanceM        float64
+	VelocityMPS      float64
+	Confidence       float64
+	CoherenceScore   float64
 }
 
 type LevelMeasurement struct {

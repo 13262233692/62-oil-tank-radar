@@ -28,6 +28,18 @@ fft:
   workers: 4
   max_queue_depth: 1000
   enable_fft_shift: true
+  enable_coherence_mask: true
+  coherence_mask_threshold: 0.35
+  phase_coherence_weight: 0.6
+  amplitude_stability_weight: 0.4
+  enable_subpixel_interp: true
+  subpixel_method: "dls"
+  dls_damping_factor: 0.001
+  dls_condition_num_limit: 10000000000
+  dls_max_iterations: 20
+  enable_multipath_suppression: true
+  multipath_null_depth: 0.2
+  multipath_harmonic_order: 3
 
 ranging:
   start_freq_ghz: 24.0
