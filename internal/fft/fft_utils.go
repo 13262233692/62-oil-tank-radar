@@ -10,6 +10,16 @@ func RangeBinToDistance(rangeBin, rangeBins, samplesPerChirp, chirpsPerFrame, ff
 	return float64(rangeBin) * nyquistRange / float64(fftSize/2)
 }
 
+func RangeBinToDistanceInterpolated(rangeBinFloat float64, rangeBins, samplesPerChirp, chirpsPerFrame, fftSize int, startFreqGHz, bandwidthGHz, sampleRateMHz float64) float64 {
+	c := 299792458.0
+	bandwidthHz := bandwidthGHz * 1e9
+
+	binResolution := c / (2 * bandwidthHz)
+	nyquistRange := binResolution * float64(fftSize) / 2
+
+	return rangeBinFloat * nyquistRange / float64(fftSize/2)
+}
+
 func DopplerBinToVelocity(dopplerBin, dopplerBins int, startFreqGHz float64, sampleRateHz float64, samplesPerChirp int) float64 {
 	c := 299792458.0
 	startFreqHz := startFreqGHz * 1e9

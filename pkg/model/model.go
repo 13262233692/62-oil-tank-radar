@@ -122,22 +122,58 @@ type PeakInfo struct {
 }
 
 type LevelMeasurement struct {
-	Timestamp     time.Time
-	FrameNumber   uint64
-	DistanceM     float64
-	LevelM        float64
-	VolumeM3      float64
-	VelocityMPS   float64
-	TemperatureC  float64
-	SNR           float64
-	SNRdB         float64
-	Confidence    float64
-	WaveHeightM   float64
-	PeakInfo      PeakInfo
-	Valid         bool
-	Status        string
-	RawData       []byte
-	refCount      int32
+	Timestamp                  time.Time
+	FrameNumber                uint64
+	DistanceM                  float64
+	LevelM                     float64
+	VolumeM3                   float64
+	RawVolumeM3                float64
+	ThermalCorrectedVolumeM3   float64
+	VelocityMPS                float64
+	TemperatureC               float64
+	AmbientTempC               float64
+	SNR                        float64
+	SNRdB                      float64
+	Confidence                 float64
+	WaveHeightM                float64
+	PeakInfo                   PeakInfo
+	Valid                      bool
+	Status                     string
+	RawData                    []byte
+	ThermalDeformation         ThermalDeformationInfo
+	VolumeAuditPassed          bool
+	VolumeAuditDeltaPpm        float64
+	refCount                   int32
+}
+
+type WallTempReading struct {
+	RingIndex      int
+	SensorIndex    int
+	TemperatureC   float64
+	Timestamp      time.Time
+	Valid          bool
+}
+
+type ThermalDeformationInfo struct {
+	Applied                  bool
+	DesignTemperatureC       float64
+	AverageWallTempC         float64
+	MaxWallTempC             float64
+	MinWallTempC             float64
+	RadialExpansionMM        []float64
+	AxialElongationMM        []float64
+	TotalVolumeExpansionM3   float64
+	TotalVolumeExpansionPpm  float64
+	HydrostaticPressurePa    []float64
+	EulerBernoulliBendingMM  []float64
+	ShellStressMPa           []float64
+	EquivalentStrain         float64
+	CorrectionFactor         float64
+	Method                   string
+	Converged                bool
+	Iterations               int
+	ConditionNumber          float64
+	RawRingTemps             []float64
 }
 
 func (m *LevelMeasurement) Ref() {

@@ -1,57 +1,66 @@
 package ranging
 
 import (
-"math"
-"sync"
-"time"
+	"math"
+	"sync"
+	"time"
 
-"github.com/oil-tank-radar/gateway/internal/config"
-"github.com/oil-tank-radar/gateway/internal/fft"
-"github.com/oil-tank-radar/gateway/pkg/model"
-"go.uber.org/zap"
+	"github.com/oil-tank-radar/gateway/internal/config"
+	"github.com/oil-tank-radar/gateway/internal/fft"
+	"github.com/oil-tank-radar/gateway/internal/thermal"
+	"github.com/oil-tank-radar/gateway/pkg/model"
+	"go.uber.org/zap"
 )
 
 type Calculator struct {
-cfg       config.RangingConfig
-fftCfg    config.FFTConfig
-framerCfg config.FramerConfig
-logger    *zap.Logger
-waveBuf   []float64
-waveIdx   int
-waveMu    sync.Mutex
-lastTemp  float64
-stats     RangingStats
-mu        sync.Mutex
+	cfg             config.RangingConfig
+	fftCfg          config.FFTConfig
+	framerCfg       config.FramerConfig
+	logger          *zap.Logger
+	waveBuf         []float64
+	waveIdx         int
+	waveMu          sync.Mutex
+	lastTemp        float64
+	lastAmbientTemp float64
+	stats           RangingStats
+	mu              sync.Mutex
+	thermalCorrector *thermal.EulerBernoulliCorrector
 }
 
 type RangingStats struct {
-Measurements   uint64
-ValidMeasurements uint64
-Errors        uint64
-AvgSNR        float64
-MinDistance    float64
-MaxDistance    float64
+	Measurements        uint64
+	ValidMeasurements   uint64
+	Errors              uint64
+	ThermalCorrections  uint64
+	VolumeAuditFailures uint64
+	AvgSNR              float64
+	MinDistance         float64
+	MaxDistance         float64
+	AvgThermalCorrectionM3 float64
 }
 
 const (
-speedOfLight    = 299792458.0
-waveBufferSize  = 100
+	speedOfLight   = 299792458.0
+	waveBufferSize = 100
 )
 
 func NewCalculator(
-cfg config.RangingConfig,
-fftCfg config.FFTConfig,
-framerCfg config.FramerConfig,
-logger *zap.Logger,
+	cfg config.RangingConfig,
+	fftCfg config.FFTConfig,
+	framerCfg config.FramerConfig,
+	logger *zap.Logger,
 ) *Calculator {
-return &Calculator{
-cfg:       cfg,
-fftCfg:    fftCfg,
-framerCfg: framerCfg,
-logger:    logger,
-waveBuf:   make([]float64, waveBufferSize),
-lastTemp:  20.0,
-}
+	calc := &Calculator{
+		cfg:             cfg,
+		fftCfg:          fftCfg,
+		framerCfg:       framerCfg,
+		logger:          logger,
+		waveBuf:         make([]float64, waveBufferSize),
+		lastTemp:        20.0,
+		lastAmbientTemp: 25.0,
+		thermalCorrector: thermal.NewEulerBernoulliCorrector(cfg),
+	}
+	return calc
 }
 
 func (c *Calculator) Calculate(
@@ -122,15 +131,49 @@ func (c *Calculator) Calculate(
 	}
 
 	level := c.cfg.TankHeightM - distance
-	if !isFinite64(level) {
+	if !isFinite64(level) || level < 0 {
 		level = 0
 	}
-	volume := c.calculateVolume(level)
-	if !isFinite64(volume) {
-		volume = 0
+
+	rawVolume := c.calculateVolume(level)
+	if !isFinite64(rawVolume) || rawVolume < 0 {
+		rawVolume = 0
 	}
+
+	defParams := thermal.DeformationParams{
+		LiquidLevelM:      level,
+		LiquidDensityKgM3: 850.0,
+		AmbientTempC:      c.lastAmbientTemp,
+	}
+	correctedVolume, correctionM3, thermalInfo := c.thermalCorrector.CorrectVolume(
+		rawVolume, level, defParams,
+	)
+
+	if thermalInfo.Applied {
+		c.mu.Lock()
+		c.stats.ThermalCorrections++
+		n := float64(c.stats.ThermalCorrections)
+		c.stats.AvgThermalCorrectionM3 =
+			(c.stats.AvgThermalCorrectionM3*(n-1) + math.Abs(correctionM3)) / n
+		c.mu.Unlock()
+	}
+
+	finalVolume := correctedVolume
+	if c.cfg.EnableVolumeAudit {
+		auditPassed, auditDeltaPpm := c.thermalCorrector.AuditVolume(
+			rawVolume, correctedVolume, thermalInfo,
+		)
+		measurement.VolumeAuditPassed = auditPassed
+		measurement.VolumeAuditDeltaPpm = auditDeltaPpm
+		if !auditPassed {
+			c.mu.Lock()
+			c.stats.VolumeAuditFailures++
+			c.mu.Unlock()
+		}
+	}
+
 	waveHeight := c.calculateWaveHeight(distance)
-	if !isFinite64(waveHeight) {
+	if !isFinite64(waveHeight) || waveHeight < 0 {
 		waveHeight = 0
 	}
 	velocity := validPeak.VelocityMPS
@@ -140,31 +183,35 @@ func (c *Calculator) Calculate(
 
 	measurement.DistanceM = distance
 	measurement.LevelM = level
-	measurement.VolumeM3 = volume
+	measurement.RawVolumeM3 = rawVolume
+	measurement.ThermalCorrectedVolumeM3 = correctedVolume
+	measurement.VolumeM3 = finalVolume
 	measurement.TemperatureC = c.lastTemp
+	measurement.AmbientTempC = c.lastAmbientTemp
 	measurement.SNR = snr
 	measurement.VelocityMPS = velocity
 	measurement.Confidence = confidence
 	measurement.WaveHeightM = waveHeight
 	measurement.PeakInfo = *validPeak
 	measurement.PeakInfo.DistanceM = distance
+	measurement.ThermalDeformation = thermalInfo
 	measurement.Valid = true
 	measurement.Status = "valid"
 
-c.mu.Lock()
-c.stats.ValidMeasurements++
-c.stats.AvgSNR = (c.stats.AvgSNR*float64(c.stats.ValidMeasurements-1) + snr) / float64(c.stats.ValidMeasurements)
-if c.stats.MinDistance == 0 || distance < c.stats.MinDistance {
-c.stats.MinDistance = distance
-}
-if distance > c.stats.MaxDistance {
-c.stats.MaxDistance = distance
-}
-c.mu.Unlock()
+	c.mu.Lock()
+	c.stats.ValidMeasurements++
+	c.stats.AvgSNR = (c.stats.AvgSNR*float64(c.stats.ValidMeasurements-1) + snr) / float64(c.stats.ValidMeasurements)
+	if c.stats.MinDistance == 0 || distance < c.stats.MinDistance {
+		c.stats.MinDistance = distance
+	}
+	if distance > c.stats.MaxDistance {
+		c.stats.MaxDistance = distance
+	}
+	c.mu.Unlock()
 
-c.addWaveSample(distance)
+	c.addWaveSample(distance)
 
-return measurement
+	return measurement
 }
 
 func (c *Calculator) selectValidPeak(peaks []model.PeakInfo) *model.PeakInfo {
@@ -228,6 +275,19 @@ func (c *Calculator) calculateDistanceFromPeak(peak *model.PeakInfo) float64 {
 	if peak.SubPixelValid && isFinite64(peak.RangeSubPixel) {
 		rangeForCalc = peak.RangeSubPixel
 	}
+	interpDist := fft.RangeBinToDistanceInterpolated(
+		rangeForCalc,
+		c.fftCfg.RangeFFTSize,
+		c.framerCfg.SamplesPerChirp,
+		c.framerCfg.ChirpsPerFrame,
+		c.fftCfg.RangeFFTSize,
+		c.cfg.StartFreqGHz,
+		c.cfg.BandwidthGHz,
+		c.cfg.SampleRateMHz,
+	)
+	if isFinite64(interpDist) && interpDist > 0 {
+		return interpDist
+	}
 	return fft.RangeBinToDistance(
 		int(math.Round(rangeForCalc)),
 		c.fftCfg.RangeFFTSize,
@@ -261,82 +321,105 @@ func (c *Calculator) calculateDistance(rangeBin int) float64 {
 }
 
 func (c *Calculator) applyTemperatureCompensation(distance float64) float64 {
-if !c.cfg.TempCompEnabled {
-return distance
-}
+	if !c.cfg.TempCompEnabled {
+		return distance
+	}
 
-temp := c.lastTemp
-refTemp := 20.0
-tempFactor := 1.0 + 0.000001 * (temp - refTemp)
+	temp := c.lastTemp
+	refTemp := 20.0
+	tempFactor := 1.0 + 0.000001*(temp-refTemp)
 
-return distance * tempFactor
+	return distance * tempFactor
 }
 
 func (c *Calculator) calculateConfidence(snr, distance float64) float64 {
-snrConfidence := 1.0 - math.Exp(-snr / 10.0)
+	snrConfidence := 1.0 - math.Exp(-snr/10.0)
 
-rangeCenter := (c.cfg.MinDistanceM + c.cfg.MaxDistanceM) / 2.0
-rangeHalf := (c.cfg.MaxDistanceM - c.cfg.MinDistanceM) / 2.0
-rangeConfidence := 1.0 - math.Abs(distance-rangeCenter)/rangeHalf
-rangeConfidence = math.Max(rangeConfidence, 0.1)
+	rangeCenter := (c.cfg.MinDistanceM + c.cfg.MaxDistanceM) / 2.0
+	rangeHalf := (c.cfg.MaxDistanceM - c.cfg.MinDistanceM) / 2.0
+	rangeConfidence := 1.0 - math.Abs(distance-rangeCenter)/rangeHalf
+	rangeConfidence = math.Max(rangeConfidence, 0.1)
 
-confidence := math.Sqrt(snrConfidence * rangeConfidence)
+	confidence := math.Sqrt(snrConfidence * rangeConfidence)
 
-return math.Max(0.0, math.Min(1.0, confidence))
+	return math.Max(0.0, math.Min(1.0, confidence))
 }
 
 func (c *Calculator) calculateVolume(level float64) float64 {
-if level <= 0 {
-return 0
-}
+	if level <= 0 {
+		return 0
+	}
 
-tankDiameter := 10.0
-tankRadius := tankDiameter / 2.0
+	tankDiameter := c.cfg.TankDiameterM
+	if tankDiameter <= 0.1 {
+		tankDiameter = 10.0
+	}
+	tankRadius := tankDiameter / 2.0
 
-return math.Pi * tankRadius * tankRadius * level
+	return math.Pi * tankRadius * tankRadius * level
 }
 
 func (c *Calculator) calculateWaveHeight(currentDistance float64) float64 {
-c.waveMu.Lock()
-defer c.waveMu.Unlock()
+	c.waveMu.Lock()
+	defer c.waveMu.Unlock()
 
-avgDistance := 0.0
-count := 0
-for _, d := range c.waveBuf {
-if d > 0 {
-avgDistance += d
-count++
-}
-}
+	avgDistance := 0.0
+	count := 0
+	for _, d := range c.waveBuf {
+		if d > 0 {
+			avgDistance += d
+			count++
+		}
+	}
 
-if count == 0 {
-return 0
-}
+	if count == 0 {
+		return 0
+	}
 
-avgDistance /= float64(count)
+	avgDistance /= float64(count)
 
-variance := 0.0
-for _, d := range c.waveBuf {
-if d > 0 {
-diff := d - avgDistance
-variance += diff * diff
-}
-}
-variance /= float64(count)
+	variance := 0.0
+	for _, d := range c.waveBuf {
+		if d > 0 {
+			diff := d - avgDistance
+			variance += diff * diff
+		}
+	}
+	variance /= float64(count)
 
-return math.Sqrt(variance) * 4.0
+	return math.Sqrt(variance) * 4.0
 }
 
 func (c *Calculator) addWaveSample(distance float64) {
-c.waveMu.Lock()
-defer c.waveMu.Unlock()
+	c.waveMu.Lock()
+	defer c.waveMu.Unlock()
 
-c.waveBuf[c.waveIdx] = distance
-c.waveIdx = (c.waveIdx + 1) % len(c.waveBuf)
+	c.waveBuf[c.waveIdx] = distance
+	c.waveIdx = (c.waveIdx + 1) % len(c.waveBuf)
 }
 
 func (c *Calculator) UpdateTemperature(temp float64) {
-c.lastTemp = temp
+	if isFinite64(temp) && temp > -60 && temp < 150 {
+		c.lastTemp = temp
+	}
+}
+
+func (c *Calculator) UpdateAmbientTemperature(temp float64) {
+	if isFinite64(temp) && temp > -60 && temp < 80 {
+		c.lastAmbientTemp = temp
+	}
+}
+
+func (c *Calculator) UpdateWallTemp(reading model.WallTempReading) {
+	if c.thermalCorrector != nil {
+		c.thermalCorrector.UpdateWallTemp(reading)
+	}
+}
+
+func (c *Calculator) UpdateBulkRingTemps(ringAvgTemps []float64) {
+	if c.thermalCorrector != nil {
+		c.thermalCorrector.UpdateBulkTemps(ringAvgTemps)
+	}
 }
 
 func (c *Calculator) CalculateVelocity(dopplerBin int) float64 {
@@ -351,62 +434,82 @@ func (c *Calculator) CalculateVelocity(dopplerBin int) float64 {
 	)
 }
 
+func (c *Calculator) GetLastThermalCorrection() model.ThermalDeformationInfo {
+	if c.thermalCorrector != nil {
+		return c.thermalCorrector.LastCorrection()
+	}
+	return model.ThermalDeformationInfo{}
+}
+
+func (c *Calculator) VolumeToBarrels(volumeM3 float64) float64 {
+	if c.thermalCorrector != nil {
+		return c.thermalCorrector.VolumeToBarrels(volumeM3)
+	}
+	return volumeM3 * 6.28981077
+}
+
 func (c *Calculator) GetWaveMeasurement() *model.WaveMeasurement {
-c.waveMu.Lock()
-defer c.waveMu.Unlock()
+	c.waveMu.Lock()
+	defer c.waveMu.Unlock()
 
-avgDistance := 0.0
-count := 0
-for _, d := range c.waveBuf {
-if d > 0 {
-avgDistance += d
-count++
-}
-}
+	avgDistance := 0.0
+	count := 0
+	for _, d := range c.waveBuf {
+		if d > 0 {
+			avgDistance += d
+			count++
+		}
+	}
 
-if count == 0 {
-return &model.WaveMeasurement{
-Timestamp: time.Now(),
-Valid:     false,
-}
-}
+	if count == 0 {
+		return &model.WaveMeasurement{
+			Timestamp: time.Now(),
+			Valid:     false,
+		}
+	}
 
-avgDistance /= float64(count)
+	avgDistance /= float64(count)
 
-variance := 0.0
-for _, d := range c.waveBuf {
-if d > 0 {
-diff := d - avgDistance
-variance += diff * diff
-}
-}
-variance /= float64(count)
+	variance := 0.0
+	for _, d := range c.waveBuf {
+		if d > 0 {
+			diff := d - avgDistance
+			variance += diff * diff
+		}
+	}
+	variance /= float64(count)
 
-waveHeight := math.Sqrt(variance) * 4.0
+	waveHeight := math.Sqrt(variance) * 4.0
 
-return &model.WaveMeasurement{
-Timestamp: time.Now(),
-HeightM:   waveHeight,
-PeriodS:    0.5,
-Valid:       true,
-}
+	return &model.WaveMeasurement{
+		Timestamp: time.Now(),
+		HeightM:   waveHeight,
+		PeriodS:   0.5,
+		Valid:     true,
+	}
 }
 
 func (c *Calculator) GetStats() RangingStats {
-c.mu.Lock()
-defer c.mu.Unlock()
-return c.stats
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stats
 }
 
 func (c *Calculator) Close() error {
-stats := c.GetStats()
-c.logger.Info("Ranging calculator stopped",
-zap.Uint64("measurements", stats.Measurements),
-zap.Uint64("valid_measurements", stats.ValidMeasurements),
-zap.Uint64("errors", stats.Errors),
-zap.Float64("avg_snr", stats.AvgSNR),
-zap.Float64("min_distance", stats.MinDistance),
-zap.Float64("max_distance", stats.MaxDistance),
-)
-return nil
+	stats := c.GetStats()
+	if c.thermalCorrector != nil {
+		c.thermalCorrector.Close()
+	}
+	c.logger.Info("Ranging calculator stopped",
+		zap.Uint64("measurements", stats.Measurements),
+		zap.Uint64("valid_measurements", stats.ValidMeasurements),
+		zap.Uint64("errors", stats.Errors),
+		zap.Uint64("thermal_corrections", stats.ThermalCorrections),
+		zap.Uint64("volume_audit_failures", stats.VolumeAuditFailures),
+		zap.Float64("avg_snr", stats.AvgSNR),
+		zap.Float64("min_distance", stats.MinDistance),
+		zap.Float64("max_distance", stats.MaxDistance),
+		zap.Float64("avg_thermal_correction_m3", stats.AvgThermalCorrectionM3),
+	)
+	return nil
 }

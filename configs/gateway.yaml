@@ -49,12 +49,27 @@ ranging:
   min_distance_m: 0.5
   max_distance_m: 25.0
   snr_threshold: 10.0
-  tank_diameter_m: 5.0
+  tank_diameter_m: 40.0
   temperature_coeff: 0.00001
   enable_temperature_compensation: true
   phase_unwrap_threshold: 3.14159
   max_velocity_m_s: 10.0
   wave_calc_window: 100
+  enable_thermal_deformation: true
+  tank_shell_thickness_mm: 18.0
+  tank_steel_youngs_mod_gpa: 205.0
+  tank_steel_poisson_ratio: 0.3
+  tank_steel_alpha_expansion: 11.7e-6
+  tank_design_temperature_c: 20.0
+  tank_ring_count: 10
+  tank_temp_sensors_per_ring: 4
+  tank_roof_type: "external_floating"
+  tank_nominal_volume_m3: 25132.74
+  wall_temp_sample_interval_ms: 1000
+  enable_volume_audit: true
+  volume_audit_tolerance_ppm: 1000
+  temp_comp_enabled: true
+  temp_sensor_addr: "sensors/wall_temp"
 
 timescaledb:
   host: "localhost"

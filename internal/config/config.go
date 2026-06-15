@@ -62,21 +62,34 @@ type FFTConfig struct {
 }
 
 type RangingConfig struct {
-StartFreqGHz           float64       `yaml:"start_freq_ghz"`
-BandwidthGHz           float64       `yaml:"bandwidth_ghz"`
-SampleRateMHz          float64       `yaml:"sample_rate_mhz"`
-TankHeightM            float64       `yaml:"tank_height_m"`
-MinDistanceM           float64       `yaml:"min_distance_m"`
-MaxDistanceM           float64       `yaml:"max_distance_m"`
-SNRThreshold           float64       `yaml:"snr_threshold"`
-TempCompEnabled        bool          `yaml:"temp_comp_enabled"`
-TempSensorAddr         string        `yaml:"temp_sensor_addr"`
-TankDiameterM          float64       `yaml:"tank_diameter_m"`
-TemperatureCoeff       float64       `yaml:"temperature_coeff"`
-EnableTemperatureComp  bool          `yaml:"enable_temperature_compensation"`
-PhaseUnwrapThreshold   float64       `yaml:"phase_unwrap_threshold"`
-MaxVelocityMS          float64       `yaml:"max_velocity_m_s"`
-WaveCalcWindow         int           `yaml:"wave_calc_window"`
+	StartFreqGHz              float64       `yaml:"start_freq_ghz"`
+	BandwidthGHz              float64       `yaml:"bandwidth_ghz"`
+	SampleRateMHz             float64       `yaml:"sample_rate_mhz"`
+	TankHeightM               float64       `yaml:"tank_height_m"`
+	MinDistanceM              float64       `yaml:"min_distance_m"`
+	MaxDistanceM              float64       `yaml:"max_distance_m"`
+	SNRThreshold              float64       `yaml:"snr_threshold"`
+	TempCompEnabled           bool          `yaml:"temp_comp_enabled"`
+	TempSensorAddr            string        `yaml:"temp_sensor_addr"`
+	TankDiameterM             float64       `yaml:"tank_diameter_m"`
+	TemperatureCoeff          float64       `yaml:"temperature_coeff"`
+	EnableTemperatureComp     bool          `yaml:"enable_temperature_compensation"`
+	PhaseUnwrapThreshold      float64       `yaml:"phase_unwrap_threshold"`
+	MaxVelocityMS             float64       `yaml:"max_velocity_m_s"`
+	WaveCalcWindow            int           `yaml:"wave_calc_window"`
+	EnableThermalDeformation  bool          `yaml:"enable_thermal_deformation"`
+	TankShellThicknessMM      float64       `yaml:"tank_shell_thickness_mm"`
+	TankSteelYoungsModGPa     float64       `yaml:"tank_steel_youngs_mod_gpa"`
+	TankSteelPoissonRatio     float64       `yaml:"tank_steel_poisson_ratio"`
+	TankSteelAlphaExp         float64       `yaml:"tank_steel_alpha_expansion"`
+	TankDesignTempC           float64       `yaml:"tank_design_temperature_c"`
+	TankRingCount             int           `yaml:"tank_ring_count"`
+	TankTempSensorsPerRing    int           `yaml:"tank_temp_sensors_per_ring"`
+	TankRoofType              string        `yaml:"tank_roof_type"`
+	TankNominalVolumeM3       float64       `yaml:"tank_nominal_volume_m3"`
+	WallTempSampleIntervalMs  int           `yaml:"wall_temp_sample_interval_ms"`
+	EnableVolumeAudit         bool          `yaml:"enable_volume_audit"`
+	VolumeAuditTolerancePpm   float64       `yaml:"volume_audit_tolerance_ppm"`
 }
 
 type TimeScaleDBConfig struct {
