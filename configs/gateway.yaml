@@ -1,0 +1,72 @@
+udp:
+  listen_addr: "0.0.0.0"
+  port: 9000
+  max_packet_size: 9000
+  recv_buf_size: 33554432
+  workers: 4
+  enable_reuse_port: false
+  read_timeout: 5s
+  idle_timeout: 30s
+
+framer:
+  adc_bits: 16
+  frame_header_size: 64
+  samples_per_chirp: 256
+  chirps_per_frame: 128
+  rx_channels: 1
+  frame_sync_timeout: 100ms
+  max_frame_size: 1048576
+
+fft:
+  range_fft_size: 256
+  doppler_fft_size: 64
+  window_type: "hann"
+  window_alpha: 0.5
+  cfar_guard_cells: 2
+  cfar_train_cells: 8
+  cfar_threshold: 5.0
+  workers: 4
+  max_queue_depth: 1000
+  enable_fft_shift: true
+
+ranging:
+  start_freq_ghz: 24.0
+  bandwidth_ghz: 250.0
+  sample_rate_mhz: 12.5
+  tank_height_m: 20.0
+  min_distance_m: 0.5
+  max_distance_m: 25.0
+  snr_threshold: 10.0
+  tank_diameter_m: 5.0
+  temperature_coeff: 0.00001
+  enable_temperature_compensation: true
+  phase_unwrap_threshold: 3.14159
+  max_velocity_m_s: 10.0
+  wave_calc_window: 100
+
+timescaledb:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "password"
+  database: "radar"
+  ssl_mode: "disable"
+  max_conns: 10
+  min_conns: 2
+  conn_max_lifetime: 1h
+  conn_max_idle_time: 30m
+  batch_size: 1000
+  flush_interval: 1s
+  hyper_table: "level_measurements"
+  enable_continuous_aggregates: true
+  aggregation_interval: "1m"
+
+runtime:
+  shutdown_timeout: 30s
+  buffer_pool_size: 1000
+  metrics_addr: ":9090"
+  enable_profiling: false
+  pprof_addr: ":6060"
+  log_level: "info"
+  enable_prometheus: true
+  grace_period: 5s
